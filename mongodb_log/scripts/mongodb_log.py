@@ -38,6 +38,7 @@ import mongodb_store.util
 
 import os
 import re
+import ssl
 import sys
 import time
 import pprint
@@ -125,7 +126,7 @@ class Barrier(object):
 class WorkerProcess(object):
     def __init__(self, idnum, topic, collname, in_counter_value, out_counter_value,
                  drop_counter_value, queue_maxsize,
-                 mongodb_host, mongodb_port, mongodb_name, nodename_prefix):
+                 mongodb_host, mongodb_port, mongodb_name, mongodb_username, mongodb_password, mongodb_certfile, mongodb_ca_certs, mongodb_authsource, nodename_prefix):
         self.name = "WorkerProcess-%4d-%s" % (idnum, topic)
         self.id = idnum
         self.topic = topic
@@ -140,6 +141,11 @@ class WorkerProcess(object):
         self.mongodb_host = mongodb_host
         self.mongodb_port = mongodb_port
         self.mongodb_name = mongodb_name
+        self.mongodb_username = mongodb_username
+        self.mongodb_password = mongodb_password
+        self.mongodb_authsource = mongodb_authsource
+        self.mongodb_certfile = mongodb_certfile
+        self.mongodb_ca_certs = mongodb_ca_certs
         self.nodename_prefix = nodename_prefix
         self.quit = Value('i', 0)
 
@@ -155,7 +161,21 @@ class WorkerProcess(object):
         if use_setproctitle:
             setproctitle("mongodb_log %s" % self.topic)
 
-        self.mongoconn = MongoClient(self.mongodb_host, self.mongodb_port)
+        if self.mongodb_username is not None and self.mongodb_password is not None and self.mongodb_certfile is not None and self.mongodb_ca_certs is not None:
+            self.mongoconn = MongoClient(self.mongodb_host, self.mongodb_port,
+                                     ssl=True,
+                                     ssl_certfile=self.mongodb_certfile,
+                                     ssl_cert_reqs=ssl.CERT_REQUIRED,
+                                     ssl_ca_certs=self.mongodb_ca_certs,
+                                     authMechanism='SCRAM-SHA-1')
+        
+            self.mongoconn[self.mongodb_authsource].authenticate(self.mongodb_username,self.mongodb_password)
+        
+        
+       
+        else:
+            self.mongoconn = MongoClient(self.mongodb_host, self.mongodb_port)
+        
         self.mongodb = self.mongoconn[self.mongodb_name]
         self.mongodb.set_profiling_level = SLOW_ONLY
 
@@ -355,6 +375,7 @@ class MongoWriter(object):
                  all_topics = False, all_topics_interval = 5,
                  exclude_topics = [],
                  mongodb_host=None, mongodb_port=None, mongodb_name="roslog", mongodb_collection=None,
+                 mongodb_username=None, mongodb_password=None, mongodb_authsource=None, mongodb_certfile=None, mongodb_ca_certs=None,
                  no_specific=False, nodename_prefix=""):
         self.all_topics = all_topics
         self.all_topics_interval = all_topics_interval
@@ -362,7 +383,12 @@ class MongoWriter(object):
         self.mongodb_host = mongodb_host
         self.mongodb_port = mongodb_port
         self.mongodb_name = mongodb_name
-        self.mongodb_collection = mongodb_collection
+        self.mongodb_collection = mongodb_collection 
+        self.mongodb_username = mongodb_username
+        self.mongodb_password = mongodb_password
+        self.mongodb_authsource = mongodb_authsource
+        self.mongodb_certfile = mongodb_certfile
+        self.mongodb_ca_certs = mongodb_ca_certs
         self.no_specific = no_specific
         self.nodename_prefix = nodename_prefix
         self.quit = False
@@ -505,6 +531,8 @@ class MongoWriter(object):
                               self.in_counter.count, self.out_counter.count,
                               self.drop_counter.count, QUEUE_MAXSIZE,
                               self.mongodb_host, self.mongodb_port, self.mongodb_name,
+                              self.mongodb_username, self.mongodb_password,
+                              self.mongodb_certfile, self.mongodb_ca_certs, self.mongodb_authsource,
                               self.nodename_prefix)
 
         return w
@@ -615,6 +643,16 @@ def main(argv):
     parser.add_option("--mongodb-name", dest="mongodb_name",
                       help="Name of DB in which to store values",
                       metavar="NAME", default="roslog")
+    parser.add_option("--auth-username", dest="mongodb_username",
+                      help="Username for authentication", default=None)
+    parser.add_option("--auth-password", dest="mongodb_password",
+                      help="Password for authentication", default=None)
+    parser.add_option("--auth-db", dest="mongodb_authsource",
+                      help="Authentication database", default=None)
+    parser.add_option("--auth-certfile", dest="mongodb_certfile",
+                      help="SSL Certificate", default=None)
+    parser.add_option("--auth-ca-certs", dest="mongodb_ca_certs",
+                      help="SSL CA Chain", default=None)
     parser.add_option("--mongodb-collection", dest="mongodb_collection",
                       help="Name of Collection in which to store values. All topics are stored in the collection if used this option, otherwise topic names are used as collections",
                       metavar="COLLECTION", default=None)
@@ -652,6 +690,11 @@ def main(argv):
                               mongodb_port=options.mongodb_port,
                               mongodb_name=options.mongodb_name,
                               mongodb_collection=options.mongodb_collection,
+                              mongodb_username = options.mongodb_username,
+                              mongodb_password = options.mongodb_password,
+                              mongodb_authsource = options.mongodb_authsource,
+                              mongodb_certfile = options.mongodb_certfile,
+                              mongodb_ca_certs = options.mongodb_ca_certs,
                               no_specific=options.no_specific,
                               nodename_prefix=options.nodename_prefix)
 
