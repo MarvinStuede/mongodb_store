@@ -275,6 +275,7 @@ class MongoPlayback(object):
         self.mongodb_host = rospy.get_param("mongodb_host")
         self.mongodb_port = rospy.get_param("mongodb_port")
         self.mongodb_username = rospy.get_param("mongodb_username", None)
+        self.mongodb_password = rospy.get_param("mongodb_password", None)
         self.mongodb_authsource = rospy.get_param("mongodb_authsource", "admin")
         self.mongodb_certfile = rospy.get_param("mongodb_certfile", None)
         self.mongodb_ca_certs = rospy.get_param("mongodb_ca_certs", None)
@@ -284,11 +285,11 @@ class MongoPlayback(object):
                                          self.mongodb_authmech)
         self.stop_called = False
 
-    def setup(self, database_name, req_topics, start_dt, end_dt, mongodb_password=None):
+    def setup(self, database_name, req_topics, start_dt, end_dt):
         """ Read in details of requested playback collections. """
 
-        if mongodb_password is not None:
-            self.mongo_client[self.mongodb_authsource].authenticate(self.mongodb_username, mongodb_password)
+        if self.mongodb_password is not None:
+            self.mongo_client[self.mongodb_authsource].authenticate(self.mongodb_username, self.mongodb_password)
 
         if database_name not in self.mongo_client.database_names():
             raise Exception('Unknown database %s' % database_name)
@@ -343,7 +344,7 @@ class MongoPlayback(object):
 
         # create playback objects
         self.players = map(lambda c: TopicPlayer(self.mongodb_host, self.mongodb_port, self.mongodb_username,
-                                                 mongodb_password, self.mongodb_authsource, self.mongodb_certfile,
+                                                 self.mongodb_password, self.mongodb_authsource, self.mongodb_certfile,
                                                  self.mongodb_ca_certs, self.mongodb_authmech, database_name, c,
                                                  self.event, start_time - pre_roll, end_time + post_roll), topics)
 
@@ -408,8 +409,6 @@ def main(argv):
     parser.add_option("--mongodb-name", dest="mongodb_name",
                       help="Name of DB from which to retrieve values",
                       metavar="NAME", default="roslog")
-    parser.add_option("--mongodb-password", dest="mongodb_password",
-                      help="Password for authentication", default=None)
     parser.add_option("-s", "--start", dest="start", type="string", default="", metavar='S',
                       help='start datetime of query, defaults to the earliest date stored in db, across all requested collections. Formatted "d/m/y H:M" e.g. "06/07/14 06:38"')
     parser.add_option("-e", "--end", dest="end", type="string", default="", metavar='E',
@@ -427,7 +426,7 @@ def main(argv):
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
 
-    playback.setup(database_name, topics, options.start, options.end, options.mongodb_password)
+    playback.setup(database_name, topics, options.start, options.end)
     playback.start()
     playback.join()
     rospy.set_param('use_sim_time', False)
