@@ -169,7 +169,7 @@ class WorkerProcess(object):
                                      ssl_ca_certs=self.mongodb_ca_certs,
                                      authMechanism='SCRAM-SHA-1')
         
-            self.mongoconn[self.mongodb_authsource].authenticate(self.mongodb_username,self.mongodb_password)
+            self.mongoconn[self.mongodb_authsource].authenticate(self.mongodb_username, self.mongodb_password)
         
         
        
