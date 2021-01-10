@@ -4,26 +4,25 @@ from __future__ import print_function
 
 import rospy
 import mongodb_store.util as mg_util
-from tqdm import tqdm, trange
+from tqdm import tqdm
 import sys
 import time
 import pymongo
 import ssl
-from multiprocessing import Process
+from multiprocessing import Process, Queue
 import calendar
 import datetime
 import threading
 import rosbag
 import multiprocessing
-from rosgraph_msgs.msg import Clock
 import signal
 from optparse import OptionParser
 import platform
 
 if float(platform.python_version()[0:2]) >= 3.0:
-    import queue as Queue
+    import queue as qQueue
 else:
-    import Queue
+    import Queue as qQueue
 
 MongoClient = mg_util.import_MongoClient()
 
@@ -55,36 +54,37 @@ def mkdatetime(date_string):
     return datetime.datetime.strptime(date_string, '%d/%m/%y %H:%M')
 
 
-class PlayerProcess(object):
+class IOProcess(object):
 
-    def __init__(self, start_time, end_time):
-        super(PlayerProcess, self).__init__()
-
-        self.start_time = start_time
-        self.end_time = end_time
+    def __init__(self):
+        super(IOProcess, self).__init__()
 
         self.running = multiprocessing.Value('b', True)
-        self.player_process = multiprocessing.Process(target=self.run, args=[self.running])
+        self.process = multiprocessing.Process(target=self.run, args=[self.running])
 
     def start(self):
-        self.player_process.start()
+        self.process.start()
 
     def stop(self):
         self.running.value = False
 
     def join(self):
-        self.player_process.join()
+        self.process.join()
 
     def is_running(self):
         return self.running.value
 
 
-class TopicReader(PlayerProcess):
+class TopicReader(IOProcess):
     """ """
 
-    def __init__(self, mongodb_host, mongodb_port, mongodb_username, mongodb_password, mongodb_authsource, mongodb_certfile,
+    def __init__(self, mongodb_host, mongodb_port, mongodb_username, mongodb_password, mongodb_authsource,
+                 mongodb_certfile,
                  mongodb_ca_certs, mongodb_authmech, db_name, collection_names, start_time, end_time, queue=None):
-        super(TopicReader, self).__init__(start_time, end_time)
+        super(TopicReader, self).__init__()
+
+        self.start_time = start_time
+        self.end_time = end_time
 
         self.mongodb_host = mongodb_host
         self.mongodb_port = mongodb_port
@@ -96,10 +96,10 @@ class TopicReader(PlayerProcess):
         self.mongodb_authmech = mongodb_authmech
         self.db_name = db_name
         self.collection_names = collection_names
+        self.queue = queue
 
     def init(self, running):
         """ Called in subprocess to do process-specific initialisation """
-
 
         self.mongo_client = mongo_client(self.mongodb_host, self.mongodb_port, self.mongodb_username,
                                          self.mongodb_authsource, self.mongodb_certfile, self.mongodb_ca_certs,
@@ -108,14 +108,12 @@ class TopicReader(PlayerProcess):
         if all((self.mongodb_username, self.mongodb_password)) is not None:
             self.mongo_client[self.mongodb_authsource].authenticate(self.mongodb_username, self.mongodb_password)
 
-
         # how many to
         buffer_size = 50
         # self.queue_thread = threading.Thread(target=self.queue_from_db, args=[running])
 
-
     def queue_from_db(self, running):
-        bag = rosbag.Bag('test.bag', 'w')
+
         for collection_name in self.collection_names:
             collection = self.mongo_client[self.db_name][collection_name]
             # make sure there's an index on time in the collection so the sort operation doesn't require the whole collection to be loaded
@@ -127,9 +125,10 @@ class TopicReader(PlayerProcess):
 
             if documents.count() == 0:
                 rospy.logwarn('No messages to read from topic %s' % collection_name)
-                return
+                continue
             else:
-                rospy.logdebug('Storing %d messages for topic %s', documents.count(), collection_name)
+                topic = documents[0]["_meta"]["topic"]
+                rospy.loginfo('Downloading %d messages for topic %s', documents.count(), topic)
 
             # load message class for this collection, they should all be the same
             msg_cls = mg_util.load_class(documents[0]["_meta"]["stored_class"])
@@ -137,8 +136,6 @@ class TopicReader(PlayerProcess):
             latch = False
             if "latch" in documents[0]["_meta"]:
                 latch = documents[0]["_meta"]["latch"]
-
-            topic = documents[0]["_meta"]["topic"]
 
             with tqdm(total=documents.count()) as pbar:
                 for document in documents:
@@ -150,32 +147,78 @@ class TopicReader(PlayerProcess):
                         # put will only work while there is space in the queue, if not it will block until another take is performed
 
                         try:
-                            publish_time=to_ros_time(document["_meta"]["inserted_at"])
+                            publish_time = to_ros_time(document["_meta"]["inserted_at"])
                             # rospy.loginfo('Writing msg from topic %s at time %s', topic, publish_time)
-                            bag.write(topic, message, publish_time)
+                            # bag.write(topic, message, publish_time)
+                            self.queue.put((topic, message, publish_time))
                         except ValueError:
                             rospy.logerr("ValueError")
-                        #self.to_publish.put((message, to_ros_time(document["_meta"]["inserted_at"])))
+                        # self.to_publish.put((message, to_ros_time(document["_meta"]["inserted_at"])))
                     else:
                         break
 
-            rospy.logdebug('All messages stored for topic %s' % collection_name)
-        bag.close()
+            rospy.loginfo('All messages downloaded and queued for topic %s' % collection_name)
+        rospy.loginfo('Finished download')
+        self.queue.put('DONE')
 
     def run(self, running):
 
         self.init(running)
         self.queue_from_db(running)
-        # self.queue_thread.join()
         self.mongo_client.close()
 
 
+class TopicWriter(IOProcess):
+    def __init__(self, queue, bag_name, bag_prefix, start_time):
+        super(TopicWriter, self).__init__()
+        self.queue = queue
+        time_str = ros_time_strftime(start_time, '%Y-%m-%d-%H-%M-%S')
+        if bag_name:
+            self.bag_name = bag_name + '.bag'
+        elif bag_prefix:
+            self.bag_name = bag_prefix + '_' + time_str + '.bag'
+        else:
+            self.bag_name = 'mongodb_' + time_str + '.bag'
 
-class MongoPlayback(object):
+    def queue_to_bag(self, running):
+
+        bag = rosbag.Bag(self.bag_name, 'w')
+        timeout = 1
+        while running.value:
+            try:
+                topic_msg_time_tuple = self.queue.get(timeout=timeout)
+                if topic_msg_time_tuple == 'DONE':
+                    break
+                topic = topic_msg_time_tuple[0]
+                msg = topic_msg_time_tuple[1]
+                publish_time = topic_msg_time_tuple[2]
+                bag.write(topic, msg, publish_time)
+
+            except qQueue.Empty as e:
+                pass
+            except ValueError:
+                rospy.logerr("ValueError")
+        rospy.loginfo('All messages written to %s', self.bag_name)
+
+        rospy.loginfo('Bag size: %s', self._sizeof_fmt(bag.size))
+        bag.close()
+
+    def run(self, running):
+        self.queue_to_bag(running)
+
+    def _sizeof_fmt(self, num, suffix='B'):
+        for unit in ['', 'Ki', 'Mi', 'Gi', 'Ti']:
+            if abs(num) < 1024.0:
+                return "%3.1f%s%s" % (num, unit, suffix)
+            num /= 1024.0
+        return "%.1f%s%s" % (num, 'Yi', suffix)
+
+
+class MongoToBag(object):
     """ Plays back stored topics from the mongodb_store """
 
     def __init__(self):
-        super(MongoPlayback, self).__init__()
+        super(MongoToBag, self).__init__()
 
         self.mongodb_host = rospy.get_param("mongodb_host")
         self.mongodb_port = rospy.get_param("mongodb_port")
@@ -189,8 +232,9 @@ class MongoPlayback(object):
                                          self.mongodb_authsource, self.mongodb_certfile, self.mongodb_ca_certs,
                                          self.mongodb_authmech)
         self.stop_called = False
+        self.queue = Queue()
 
-    def setup(self, database_name, req_topics, start_dt, end_dt):
+    def setup(self, database_name, req_topics, start_dt, end_dt, bag_prefix, bag_name):
         """ Read in details of requested playback collections. """
 
         if self.mongodb_password is not None:
@@ -212,7 +256,7 @@ class MongoPlayback(object):
         else:
             topics = set(collection_names)
 
-        print('Playing back topics %s' % topics)
+        print('Storing topics %s' % topics)
 
         # create mongo collections
         collections = [database[collection_name] for collection_name in topics]
@@ -240,39 +284,28 @@ class MongoPlayback(object):
         # rospy.loginfo('Playing back from %s' % to_datetime(start_time))
         # rospy.loginfo('.............. to %s' % to_datetime(end_time))
 
-        self.event = multiprocessing.Event()
-
-        # create clock thread
         pre_roll = rospy.Duration(2)
         post_roll = rospy.Duration(0)
-        # self.clock_player = ClockPlayer(self.event, start_time, end_time, pre_roll, post_roll)
 
         # create playback objects
         self.reader = TopicReader(self.mongodb_host, self.mongodb_port, self.mongodb_username,
-                                                 self.mongodb_password, self.mongodb_authsource, self.mongodb_certfile,
-                                                 self.mongodb_ca_certs, self.mongodb_authmech, database_name, topics,
-                                                 start_time - pre_roll, end_time + post_roll)
+                                  self.mongodb_password, self.mongodb_authsource, self.mongodb_certfile,
+                                  self.mongodb_ca_certs, self.mongodb_authmech, database_name, topics,
+                                  start_time - pre_roll, end_time + post_roll, self.queue)
+        self.writer = TopicWriter(self.queue, bag_name, bag_prefix, start_time)
 
     def start(self):
-
-        # this creates new processes and publishers for each topic
         self.reader.start()
-
-        # all players wait for this before starting --
-        # todo: it could happen that his gets hit before all are constructed though
-        self.event.set()
+        self.writer.start()
 
     def join(self):
-
-        # self.clock_player.join()
-
-        # if clock runs out but we weren't killed then we need ot stop other processes
         self.reader.join()
+        self.writer.join()
 
     def stop(self):
         self.stop_called = True
-        # self.clock_player.stop()
         self.reader.stop()
+        self.writer.stop()
 
     def is_running(self):
         return True
@@ -307,23 +340,27 @@ def main(argv):
                       help='start datetime of query, defaults to the earliest date stored in db, across all requested collections. Formatted "d/m/y H:M" e.g. "06/07/14 06:38"')
     parser.add_option("-e", "--end", dest="end", type="string", default="", metavar='E',
                       help='end datetime of query, defaults to the latest date stored in db, across all requested collections. Formatted "d/m/y H:M" e.g. "06/07/14 06:38"')
+    parser.add_option("-o", "--output-prefix", dest="bag_prefix", type="string", default="", metavar='PREFIX',
+                      help='prepend PREFIX to beginning of bag name (name will always end with date stamp of query start)')
+    parser.add_option("-O", "--output-name", dest="bag_name", type="string", default="", metavar='NAME',
+                      help='record to bag with name NAME.bag"')
+
     (options, args) = parser.parse_args(myargv)
 
     database_name = options.mongodb_name
     topics = set(args[1:])
-    rospy.init_node("mongodb_to_rosbag", log_level=rospy.DEBUG)
-    playback = MongoPlayback()
+    rospy.init_node("mongodb_to_rosbag", log_level=rospy.INFO)
+    mongo_to_bag = MongoToBag()
 
     def signal_handler(signal, frame):
-        playback.stop()
+        mongo_to_bag.stop()
 
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
 
-    playback.setup(database_name, topics, options.start, options.end)
-    playback.start()
-    playback.join()
-    rospy.set_param('use_sim_time', False)
+    mongo_to_bag.setup(database_name, topics, options.start, options.end, options.bag_prefix, options.bag_name)
+    mongo_to_bag.start()
+    mongo_to_bag.join()
 
 
 # processes load main so move init_node out
