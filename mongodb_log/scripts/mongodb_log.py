@@ -190,7 +190,7 @@ class WorkerProcess(object):
 
         worker_node_name = WORKER_NODE_NAME % (self.nodename_prefix, self.id, self.collname)
         # print "Calling init_node with %s from process %s" % (worker_node_name, mp.current_process())
-        rospy.init_node(worker_node_name, anonymous=False)
+        rospy.init_node(worker_node_name, anonymous=False, log_level=rospy.DEBUG)
 
         self.subscriber = None
         while not self.subscriber and not self.is_quit():
@@ -642,17 +642,17 @@ def main(argv):
                       metavar="PORT", default=rospy.get_param("mongodb_port", 27017))
     parser.add_option("--mongodb-name", dest="mongodb_name",
                       help="Name of DB in which to store values",
-                      metavar="NAME", default="roslog")
+                      metavar="NAME", default=rospy.get_param("mongodb_name", "roslog"))
     parser.add_option("--auth-username", dest="mongodb_username",
-                      help="Username for authentication", default=None)
+                      help="Username for authentication", default=rospy.get_param("mongodb_username", None))
     parser.add_option("--auth-password", dest="mongodb_password",
-                      help="Password for authentication", default=None)
+                      help="Password for authentication", default=rospy.get_param("mongodb_password", None))
     parser.add_option("--auth-db", dest="mongodb_authsource",
-                      help="Authentication database", default=None)
+                      help="Authentication database", default=rospy.get_param("mongodb_authsource", "admin"))
     parser.add_option("--auth-certfile", dest="mongodb_certfile",
-                      help="SSL Certificate", default=None)
+                      help="SSL Certificate", default=rospy.get_param("mongodb_certfile", None))
     parser.add_option("--auth-ca-certs", dest="mongodb_ca_certs",
-                      help="SSL CA Chain", default=None)
+                      help="SSL CA Chain", default=rospy.get_param("mongodb_ca_certs", None))
     parser.add_option("--mongodb-collection", dest="mongodb_collection",
                       help="Name of Collection in which to store values. All topics are stored in the collection if used this option, otherwise topic names are used as collections",
                       metavar="COLLECTION", default=None)
@@ -681,7 +681,13 @@ def main(argv):
     except socket.error:
         print("Failed to communicate with master")
 
-    mongowriter = MongoWriter(topics=args,
+    if args[0] == 'PARAM':
+        print("Reading topics from parameter server")
+        topics = rospy.get_param("log_topics")
+    else:
+        topics = args
+
+    mongowriter = MongoWriter(topics=topics,
                               treat_as_regex=options.treat_as_regex,
                               all_topics=options.all_topics,
                               all_topics_interval = options.all_topics_interval,
