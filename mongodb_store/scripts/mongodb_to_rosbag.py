@@ -18,6 +18,8 @@ import multiprocessing
 import signal
 from optparse import OptionParser
 import platform
+import os
+from copy import copy
 
 if float(platform.python_version()[0:2]) >= 3.0:
     import queue as qQueue
@@ -80,7 +82,7 @@ class TopicReader(IOProcess):
 
     def __init__(self, mongodb_host, mongodb_port, mongodb_username, mongodb_password, mongodb_authsource,
                  mongodb_certfile,
-                 mongodb_ca_certs, mongodb_authmech, db_name, collection_names, start_time, end_time, queue=None):
+                 mongodb_ca_certs, mongodb_authmech, db_name, collection_names, start_time, end_time, queue, keep_throttled):
         super(TopicReader, self).__init__()
 
         self.start_time = start_time
@@ -97,6 +99,7 @@ class TopicReader(IOProcess):
         self.db_name = db_name
         self.collection_names = collection_names
         self.queue = queue
+        self.keep_throttled = keep_throttled
 
     def init(self, running):
         """ Called in subprocess to do process-specific initialisation """
@@ -129,6 +132,13 @@ class TopicReader(IOProcess):
             else:
                 topic = documents[0]["_meta"]["topic"]
                 rospy.loginfo('Downloading %d messages for topic %s', documents.count(), topic)
+
+            if self.keep_throttled is False:
+                str_t = '_throttle'
+                if topic.endswith(str_t):
+                    topic = topic[:-len(str_t)]
+
+
 
             # load message class for this collection, they should all be the same
             msg_cls = mg_util.load_class(documents[0]["_meta"]["stored_class"])
@@ -199,9 +209,10 @@ class TopicWriter(IOProcess):
             except ValueError:
                 rospy.logerr("ValueError")
         rospy.loginfo('All messages written to %s', self.bag_name)
+        # rospy.loginfo('Bag size: %s', self._sizeof_fmt(bag.size))
 
-        rospy.loginfo('Bag size: %s', self._sizeof_fmt(bag.size))
         bag.close()
+        os.system('rosbag info ' + self.bag_name)
 
     def run(self, running):
         self.queue_to_bag(running)
@@ -234,7 +245,7 @@ class MongoToBag(object):
         self.stop_called = False
         self.queue = Queue()
 
-    def setup(self, database_name, req_topics, start_dt, end_dt, bag_prefix, bag_name):
+    def setup(self, database_name, req_topics, start_dt, end_dt, bag_prefix, bag_name, keep_throttled):
         """ Read in details of requested playback collections. """
 
         if self.mongodb_password is not None:
@@ -256,7 +267,11 @@ class MongoToBag(object):
         else:
             topics = set(collection_names)
 
-        print('Storing topics %s' % topics)
+
+        print('Reading topics %s' % topics)
+
+        if keep_throttled is False:
+            rospy.loginfo("Removing _throttle suffix from topics")
 
         # create mongo collections
         collections = [database[collection_name] for collection_name in topics]
@@ -291,7 +306,7 @@ class MongoToBag(object):
         self.reader = TopicReader(self.mongodb_host, self.mongodb_port, self.mongodb_username,
                                   self.mongodb_password, self.mongodb_authsource, self.mongodb_certfile,
                                   self.mongodb_ca_certs, self.mongodb_authmech, database_name, topics,
-                                  start_time - pre_roll, end_time + post_roll, self.queue)
+                                  start_time - pre_roll, end_time + post_roll, self.queue, keep_throttled)
         self.writer = TopicWriter(self.queue, bag_name, bag_prefix, start_time)
 
     def start(self):
@@ -343,12 +358,21 @@ def main(argv):
     parser.add_option("-o", "--output-prefix", dest="bag_prefix", type="string", default="", metavar='PREFIX',
                       help='prepend PREFIX to beginning of bag name (name will always end with date stamp of query start)')
     parser.add_option("-O", "--output-name", dest="bag_name", type="string", default="", metavar='NAME',
-                      help='record to bag with name NAME.bag"')
+                      help='record to bag with name NAME.bag')
+    parser.add_option("-t", "--keep-throttled", dest="keep_throttled", action='store_true',
+                      help='If true, _throttle suffix will not be removed from topics')
+    parser.set_defaults(keep_throttled=False)
 
-    (options, args) = parser.parse_args(myargv)
+    (options, args) = parser.parse_args(rospy.myargv(argv=sys.argv)[1:])
 
     database_name = options.mongodb_name
-    topics = set(args[1:])
+
+    if args[0] == 'PARAM':
+        print("Reading topics from parameter server")
+        topics = rospy.get_param("log_topics")
+    else:
+        topics = args
+
     rospy.init_node("mongodb_to_rosbag", log_level=rospy.INFO)
     mongo_to_bag = MongoToBag()
 
@@ -358,7 +382,8 @@ def main(argv):
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
 
-    mongo_to_bag.setup(database_name, topics, options.start, options.end, options.bag_prefix, options.bag_name)
+    mongo_to_bag.setup(database_name, topics, options.start, options.end, options.bag_prefix, options.bag_name,
+                       options.keep_throttled)
     mongo_to_bag.start()
     mongo_to_bag.join()
 
