@@ -82,7 +82,8 @@ class TopicReader(IOProcess):
 
     def __init__(self, mongodb_host, mongodb_port, mongodb_username, mongodb_password, mongodb_authsource,
                  mongodb_certfile,
-                 mongodb_ca_certs, mongodb_authmech, db_name, collection_names, start_time, end_time, queue, keep_throttled):
+                 mongodb_ca_certs, mongodb_authmech, db_name, collection_names, start_time, end_time, queue,
+                 keep_throttled):
         super(TopicReader, self).__init__()
 
         self.start_time = start_time
@@ -116,7 +117,7 @@ class TopicReader(IOProcess):
         # self.queue_thread = threading.Thread(target=self.queue_from_db, args=[running])
 
     def queue_from_db(self, running):
-
+        break_loop = False
         for collection_name in self.collection_names:
             collection = self.mongo_client[self.db_name][collection_name]
             # make sure there's an index on time in the collection so the sort operation doesn't require the whole collection to be loaded
@@ -137,8 +138,6 @@ class TopicReader(IOProcess):
                 str_t = '_throttle'
                 if topic.endswith(str_t):
                     topic = topic[:-len(str_t)]
-
-
 
             # load message class for this collection, they should all be the same
             msg_cls = mg_util.load_class(documents[0]["_meta"]["stored_class"])
@@ -165,11 +164,17 @@ class TopicReader(IOProcess):
                             rospy.logerr("ValueError")
                         # self.to_publish.put((message, to_ros_time(document["_meta"]["inserted_at"])))
                     else:
+                        break_loop = True
                         break
+                if break_loop:
+                    break
 
             rospy.loginfo('All messages downloaded and queued for topic %s' % collection_name)
-        rospy.loginfo('Finished download')
-        self.queue.put('DONE')
+        if break_loop:
+            rospy.loginfo('Canceled download')
+        else:
+            rospy.loginfo('Finished download')
+            self.queue.put('DONE')
 
     def run(self, running):
 
@@ -266,7 +271,6 @@ class MongoToBag(object):
                 print('WARNING Dropped non-existant requested topics for playback: %s' % dropped)
         else:
             topics = set(collection_names)
-
 
         print('Reading topics %s' % topics)
 
