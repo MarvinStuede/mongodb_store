@@ -19,7 +19,9 @@ import signal
 from optparse import OptionParser
 import platform
 import os
+import pytz
 from copy import copy
+
 
 if float(platform.python_version()[0:2]) >= 3.0:
     import queue as qQueue
@@ -47,13 +49,13 @@ def to_datetime(rt):
     return datetime.datetime.utcfromtimestamp(rt.secs) + datetime.timedelta(microseconds=rt.nsecs / 1000)
 
 
-def ros_time_strftime(rt, format):
+def ros_time_strftime(rt, format, utc_offset=1.0):
     """ converts a ros time to a datetime and calls strftime on it with the given format """
-    return to_datetime(rt).strftime(format)
+    return (to_datetime(rt) + datetime.timedelta(hours=utc_offset)).strftime(format)
 
 
-def mkdatetime(date_string):
-    return datetime.datetime.strptime(date_string, '%d/%m/%y %H:%M')
+def mkdatetime(date_string, utc_offset=1.0):
+    return datetime.datetime.strptime(date_string, '%d/%m/%y %H:%M') - datetime.timedelta(hours=utc_offset)
 
 
 class IOProcess(object):
