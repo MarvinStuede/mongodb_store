@@ -141,8 +141,14 @@ class TopicReader(IOProcess):
                 if topic.endswith(str_t):
                     topic = topic[:-len(str_t)]
 
-            # load message class for this collection, they should all be the same
-            msg_cls = mg_util.load_class(documents[0]["_meta"]["stored_class"])
+
+            try:
+                # load message class for this collection, they should all be the same
+                msg_cls = mg_util.load_class(documents[0]["_meta"]["stored_class"])
+            except ImportError as e:
+                rospy.logerr("ERROR: Message type for topic '" + topic + "' not found on system: " + e.message)
+                rospy.logerr("Skipping topic '" + topic + "'")
+                continue
 
             latch = False
             if "latch" in documents[0]["_meta"]:
